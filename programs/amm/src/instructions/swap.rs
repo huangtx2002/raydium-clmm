@@ -150,10 +150,15 @@ pub fn swap_internal<'b, 'info>(
     is_base_input: bool,
     block_timestamp: u32,
 ) -> Result<(u64, u64)> {
+    // Ensure the specified amount is not zero
     require!(amount_specified != 0, ErrorCode::ZeroAmountSpecified);
+
+    // Check if the pool allows swaps
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap) {
         return err!(ErrorCode::NotApproved);
     }
+
+    // Ensure the sqrt price limit is within valid bounds
     require!(
         if zero_for_one {
             sqrt_price_limit_x64 < pool_state.sqrt_price_x64
@@ -165,10 +170,13 @@ pub fn swap_internal<'b, 'info>(
         ErrorCode::SqrtPriceLimitOverflow
     );
 
+    // Store the initial liquidity
     let liquidity_start = pool_state.liquidity;
 
+    // Update reward information based on the current timestamp
     let updated_reward_infos = pool_state.update_reward_infos(block_timestamp as u64)?;
 
+    // Initialize the swap state
     let mut state = SwapState {
         amount_specified_remaining: amount_specified,
         amount_calculated: 0,
@@ -186,12 +194,15 @@ pub fn swap_internal<'b, 'info>(
     };
 
     // check observation account is owned by the pool
+    // Ensure the observation account is owned by the pool
     require_keys_eq!(observation_state.pool_id, pool_state.key());
 
+    // Get the first initialized tick array
     let (mut is_match_pool_current_tick_array, first_vaild_tick_array_start_index) =
         pool_state.get_first_initialized_tick_array(&tickarray_bitmap_extension, zero_for_one)?;
     let mut current_vaild_tick_array_start_index = first_vaild_tick_array_start_index;
 
+    // Load the first tick array state
     let mut tick_array_current = tick_array_states.pop_front().unwrap();
     // find the first active tick array account
     for _ in 0..tick_array_states.len() {
@@ -233,6 +244,7 @@ pub fn swap_internal<'b, 'info>(
         let mut step = StepComputations::default();
         step.sqrt_price_start_x64 = state.sqrt_price_x64;
 
+        // Find the next initialized tick
         let mut next_initialized_tick = if let Some(tick_state) = tick_array_current
             .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
         {
@@ -252,6 +264,8 @@ pub fn swap_internal<'b, 'info>(
             identity(next_initialized_tick.tick),
             tick_array_current.key().to_string(),
         );
+
+        // If no initialized tick is found, find the next initialized tick array
         if !next_initialized_tick.is_initialized() {
             let next_initialized_tickarray_index = pool_state
                 .next_initialized_tick_array_start_index(
@@ -278,6 +292,7 @@ pub fn swap_internal<'b, 'info>(
         step.tick_next = next_initialized_tick.tick;
         step.initialized = next_initialized_tick.is_initialized();
 
+        // Ensure the tick is within valid bounds
         if step.tick_next < tick_math::MIN_TICK {
             step.tick_next = tick_math::MIN_TICK;
         } else if step.tick_next > tick_math::MAX_TICK {
@@ -285,6 +300,7 @@ pub fn swap_internal<'b, 'info>(
         }
         step.sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
 
+        // Determine the target price
         let target_price = if (zero_for_one && step.sqrt_price_next_x64 < sqrt_price_limit_x64)
             || (!zero_for_one && step.sqrt_price_next_x64 > sqrt_price_limit_x64)
         {
@@ -293,6 +309,7 @@ pub fn swap_internal<'b, 'info>(
             step.sqrt_price_next_x64
         };
 
+        // Ensure the price and tick constraints are met
         if zero_for_one {
             require_gte!(state.tick, step.tick_next);
             require_gte!(step.sqrt_price_start_x64, step.sqrt_price_next_x64);
@@ -310,6 +327,8 @@ pub fn swap_internal<'b, 'info>(
             state.liquidity,
             state.amount_specified_remaining
         );
+
+        // Compute the swap step
         let swap_step = swap_math::compute_swap_step(
             step.sqrt_price_start_x64,
             target_price,
@@ -322,11 +341,15 @@ pub fn swap_internal<'b, 'info>(
         )?;
         #[cfg(feature = "enable-log")]
         msg!("{:#?}", swap_step);
+
+        // Ensure the swap step constraints are met
         if zero_for_one {
             require_gte!(swap_step.sqrt_price_next_x64, target_price);
         } else {
             require_gte!(target_price, swap_step.sqrt_price_next_x64);
         }
+
+        // Update the swap state
         state.sqrt_price_x64 = swap_step.sqrt_price_next_x64;
         step.amount_in = swap_step.amount_in;
         step.amount_out = swap_step.amount_out;
@@ -359,6 +382,7 @@ pub fn swap_internal<'b, 'info>(
 
         let step_fee_amount = step.fee_amount;
         // if the protocol fee is on, calculate how much is owed, decrement fee_amount, and increment protocol_fee
+        // Calculate and update protocol fee
         if amm_config.protocol_fee_rate > 0 {
             let delta = U128::from(step_fee_amount)
                 .checked_mul(amm_config.protocol_fee_rate.into())
@@ -370,6 +394,7 @@ pub fn swap_internal<'b, 'info>(
             state.protocol_fee = state.protocol_fee.checked_add(delta).unwrap();
         }
         // if the fund fee is on, calculate how much is owed, decrement fee_amount, and increment fund_fee
+        // Calculate and update fund fee
         if amm_config.fund_fee_rate > 0 {
             let delta = U128::from(step_fee_amount)
                 .checked_mul(amm_config.fund_fee_rate.into())
@@ -474,6 +499,7 @@ pub fn swap_internal<'b, 'info>(
         // });
     }
     // update tick
+    // Update the pool state with the final tick and price
     if state.tick != pool_state.tick_current {
         pool_state.tick_current = state.tick;
     }
@@ -486,6 +512,7 @@ pub fn swap_internal<'b, 'info>(
         pool_state.liquidity = state.liquidity;
     }
 
+    // Calculate the final amounts for token 0 and token 1
     let (amount_0, amount_1) = if zero_for_one == is_base_input {
         (
             amount_specified
@@ -502,6 +529,7 @@ pub fn swap_internal<'b, 'info>(
         )
     };
 
+    // Update the pool state with the final fee and swap amounts
     if zero_for_one {
         pool_state.fee_growth_global_0_x64 = state.fee_growth_global_x64;
         pool_state.total_fees_token_0 = pool_state
@@ -570,6 +598,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
     sqrt_price_limit_x64: u128,
     is_base_input: bool,
 ) -> Result<u64> {
+    // Get the current block timestamp
     let block_timestamp = solana_program::clock::Clock::get()?.unix_timestamp as u64;
 
     let amount_0;
@@ -577,16 +606,20 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
     let zero_for_one;
     let swap_price_before;
 
+    // Store the input and output vault balances before the swap
     let input_balance_before = ctx.input_vault.amount;
     let output_balance_before = ctx.output_vault.amount;
 
     {
+        // Load the pool state and store the initial swap price
         swap_price_before = ctx.pool_state.load()?.sqrt_price_x64;
         let pool_state = &mut ctx.pool_state.load_mut()?;
         zero_for_one = ctx.input_vault.mint == pool_state.token_mint_0;
 
+        // Ensure the swap is allowed based on the pool's open time
         require_gt!(block_timestamp, pool_state.open_time);
 
+        // Ensure the input and output vaults match the pool's configuration
         require!(
             if zero_for_one {
                 ctx.input_vault.key() == pool_state.token_vault_0
@@ -598,10 +631,12 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             ErrorCode::InvalidInputPoolVault
         );
 
+        // Initialize the tick array states and bitmap extension
         let mut tickarray_bitmap_extension = None;
         let tick_array_states = &mut VecDeque::new();
         tick_array_states.push_back(ctx.tick_array_state.load_mut()?);
 
+        // Load the tick array bitmap extension if it exists
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
         for account_info in remaining_accounts.into_iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
@@ -615,6 +650,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             tick_array_states.push_back(AccountLoad::load_data_mut(account_info)?);
         }
 
+        // Perform the swap using the swap_internal function
         (amount_0, amount_1) = swap_internal(
             &ctx.amm_config,
             pool_state,
@@ -643,11 +679,15 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             amount_0,
             amount_1
         );
+
+        // Ensure the swap amounts are non-zero
         require!(
             amount_0 != 0 && amount_1 != 0,
             ErrorCode::TooSmallInputOrOutputAmount
         );
     }
+
+    // Determine the token accounts and vaults based on the swap direction
     let (token_account_0, token_account_1, vault_0, vault_1) = if zero_for_one {
         (
             ctx.input_token_account.clone(),
@@ -664,8 +704,10 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         )
     };
 
+    // Transfer tokens between the user's accounts and the pool's vaults
     if zero_for_one {
         //  x -> y, deposit x token from user to pool vault.
+        // Transfer input tokens from the user to the pool vault
         transfer_from_user_to_pool_vault(
             &ctx.signer,
             &token_account_0,
@@ -675,11 +717,14 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             None,
             amount_0,
         )?;
+        // Check if the pool has sufficient output tokens
         if vault_1.amount <= amount_1 {
             // freeze pool, disable all instructions
+            // Freeze the pool if there are insufficient output tokens
             ctx.pool_state.load_mut()?.set_status(255);
         }
         // x -> y，transfer y token from pool vault to user.
+        // Transfer output tokens from the pool vault to the user
         transfer_from_pool_vault_to_user(
             &ctx.pool_state,
             &vault_1,
@@ -690,6 +735,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             amount_1,
         )?;
     } else {
+        // Transfer input tokens from the user to the pool vault
         transfer_from_user_to_pool_vault(
             &ctx.signer,
             &token_account_1,
@@ -699,10 +745,13 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             None,
             amount_1,
         )?;
+        // Check if the pool has sufficient output tokens
         if vault_0.amount <= amount_0 {
             // freeze pool, disable all instructions
+            // Freeze the pool if there are insufficient output tokens
             ctx.pool_state.load_mut()?.set_status(255);
         }
+        // Transfer output tokens from the pool vault to the user
         transfer_from_pool_vault_to_user(
             &ctx.pool_state,
             &vault_0,
@@ -713,9 +762,12 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             amount_0,
         )?;
     }
+
+    // Reload the vault balances after the transfers
     ctx.output_vault.reload()?;
     ctx.input_vault.reload()?;
 
+    // Emit a swap event with the details of the swap
     let pool_state = ctx.pool_state.load()?;
     emit!(SwapEvent {
         pool_state: pool_state.key(),
@@ -731,11 +783,15 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         liquidity: pool_state.liquidity,
         tick: pool_state.tick_current
     });
+
+    // Ensure the swap price has changed as expected
     if zero_for_one {
         require_gt!(swap_price_before, pool_state.sqrt_price_x64);
     } else {
         require_gt!(pool_state.sqrt_price_x64, swap_price_before);
     }
+
+    // Ensure the entire specified amount was swapped if no price limit was set
     if sqrt_price_limit_x64 == 0 {
         // Does't allow partial filled without specified limit_price.
         if is_base_input {
@@ -753,6 +809,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         }
     }
 
+    // Return the amount of tokens received by the user
     if is_base_input {
         Ok(output_balance_before
             .checked_sub(ctx.output_vault.amount)

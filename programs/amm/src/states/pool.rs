@@ -64,14 +64,17 @@ pub struct PoolState {
     pub owner: Pubkey,
 
     /// Token pair of the pool, where token_mint_0 address < token_mint_1 address
+    /// Mint account manages the supply of a specific token: minting new tokens, transfering tokens, and burning tokens.
     pub token_mint_0: Pubkey,
     pub token_mint_1: Pubkey,
 
     /// Token pair vault
+    /// vault acount own the taken and manage token balance, and facilitate token swaps
     pub token_vault_0: Pubkey,
     pub token_vault_1: Pubkey,
 
     /// observation account key
+    /// observation account is used to store historical data about the pool's state, including price changes, liquidity cahgnes, and other relevant metircs. Purpose is for tracking the historical performance of the pool, calculating metrics liek TWAP, and analyzing trends and patterns in the poo's behavior.
     pub observation_key: Pubkey,
 
     /// mint0 and mint1 decimals
@@ -92,10 +95,15 @@ pub struct PoolState {
 
     /// The fee growth as a Q64.64 number, i.e. fees of token_0 and token_1 collected per
     /// unit of liquidity for the entire life of the pool.
+    /// Fees are typically collected from the transacitons that occur within the pool. These transactions include swaps, liquidity provision, and otehr operations that invole token transfers.
+    /// Including fees collect and distribute
+    /// cumulattive fees
+    /// fee_growth_global = protocol fees + totoal fees + fund fees
     pub fee_growth_global_0_x64: u128,
     pub fee_growth_global_1_x64: u128,
 
     /// The amounts of token_0 and token_1 that are owed to the protocol.
+    /// These fees are typically used to fund the development and maintenance of the protocol
     pub protocol_fees_token_0: u64,
     pub protocol_fees_token_1: u64,
 
@@ -127,6 +135,7 @@ pub struct PoolState {
     pub total_fees_token_1: u64,
     pub total_fees_claimed_token_1: u64,
 
+    /// Fund fees common uses include rewarding liquidity providers, funding development, or covering operational costs. Collected from transactions by fund_fee_rate.
     pub fund_fees_token_0: u64,
     pub fund_fees_token_1: u64,
 
@@ -245,12 +254,16 @@ impl PoolState {
         authority: &Pubkey,
         operation_state: &OperationState,
     ) -> Result<()> {
+        // Get the reward information array
         let reward_infos = self.reward_infos;
+
+        // Find the lowest index in the reward_infos array where the reward is not initialized
         let lowest_index = match reward_infos.iter().position(|r| !r.initialized()) {
             Some(lowest_index) => lowest_index,
             None => return Err(ErrorCode::FullRewardInfo.into()),
         };
 
+        // Check if the lowest index is within the allowed range
         if lowest_index >= REWARD_NUM {
             return Err(ErrorCode::FullRewardInfo.into());
         }
@@ -309,40 +322,56 @@ impl PoolState {
 
     // Calculates the next global reward growth variables based on the given timestamp.
     // The provided timestamp must be greater than or equal to the last updated timestamp.
+    // This function updates the global reward growth variables based on the provided timestamp.
+    // The current timestamp must be greater than or equal to the last recorded update time.
     pub fn update_reward_infos(&mut self, curr_timestamp: u64) -> Result<[RewardInfo; REWARD_NUM]> {
         #[cfg(feature = "enable-log")]
         msg!("current block timestamp:{}", curr_timestamp);
 
+        // Make a mutable copy of the current reward information array.
         let mut next_reward_infos = self.reward_infos;
 
+        // Loop through each reward in the reward array.
         for i in 0..REWARD_NUM {
             let reward_info = &mut next_reward_infos[i];
+
+            // If the reward is not initialized, skip to the next one.
             if !reward_info.initialized() {
                 continue;
             }
+
+            // If the current timestamp is less than or equal to the reward’s open time, skip it.
             if curr_timestamp <= reward_info.open_time {
                 continue;
             }
+
+            // Determine the latest possible update time, either the current timestamp or the reward’s end time, whichever is smaller.
             let latest_update_timestamp = curr_timestamp.min(reward_info.end_time);
 
+            // Only proceed if there’s liquidity in the pool.
             if self.liquidity != 0 {
+                // Ensure the latest update timestamp is not earlier than the last update time.
                 require_gte!(latest_update_timestamp, reward_info.last_update_time);
+                // Calculate the time difference since the last update.
                 let time_delta = latest_update_timestamp
                     .checked_sub(reward_info.last_update_time)
                     .unwrap();
 
+                // Calculate the reward growth increment based on emissions and liquidity.
                 let reward_growth_delta = U256::from(time_delta)
                     .mul_div_floor(
-                        U256::from(reward_info.emissions_per_second_x64),
-                        U256::from(self.liquidity),
+                        U256::from(reward_info.emissions_per_second_x64), // Emissions per second
+                        U256::from(self.liquidity), // Total liquidity in the pool
                     )
                     .unwrap();
 
+                // Update the global reward growth by adding the calculated increment.
                 reward_info.reward_growth_global_x64 = reward_info
                     .reward_growth_global_x64
                     .checked_add(reward_growth_delta.as_u128())
                     .unwrap();
 
+                // Update the total rewards emitted by adding the increment based on time and emissions per second.
                 reward_info.reward_total_emissioned = reward_info
                     .reward_total_emissioned
                     .checked_add(
@@ -368,8 +397,11 @@ impl PoolState {
                     identity(reward_info.reward_claimed)
                 );
             }
+
+            // Update the last update time for the reward.
             reward_info.last_update_time = latest_update_timestamp;
             // update reward state
+            // Set the reward’s state based on whether the latest update time is within the reward's active period.
             if latest_update_timestamp >= reward_info.open_time
                 && latest_update_timestamp < reward_info.end_time
             {
@@ -378,16 +410,23 @@ impl PoolState {
                 next_reward_infos[i].reward_state = RewardState::Ended as u8;
             }
         }
+        // Update the pool's reward info array to the newly calculated values.
         self.reward_infos = next_reward_infos;
         #[cfg(feature = "enable-log")]
         msg!("update pool reward info, reward_0_total_emissioned:{}, reward_1_total_emissioned:{}, reward_2_total_emissioned:{}, pool.liquidity:{}",
         identity(self.reward_infos[0].reward_total_emissioned),identity(self.reward_infos[1].reward_total_emissioned),identity(self.reward_infos[2].reward_total_emissioned), identity(self.liquidity));
+
+        // Update the recent epoch timestamp of the pool.
         self.recent_epoch = get_recent_epoch()?;
+
+        // Return the updated reward information array.
         Ok(next_reward_infos)
     }
 
     pub fn check_unclaimed_reward(&self, index: usize, reward_amount_owed: u64) -> Result<()> {
+        // Ensure the index is within the valid range of reward indices
         assert!(index < REWARD_NUM);
+
         let unclaimed_reward = self.reward_infos[index]
             .reward_total_emissioned
             .checked_sub(self.reward_infos[index].reward_claimed)
@@ -417,10 +456,16 @@ impl PoolState {
     }
 
     fn flip_tick_array_bit_internal(&mut self, tick_array_start_index: i32) -> Result<()> {
+        // Calculate the offset of the tick array in the bitmap
         let tick_array_offset_in_bitmap = self.get_tick_array_offset(tick_array_start_index)?;
 
+        // Convert the tick array bitmap to a U1024 type for bitwise operations
         let tick_array_bitmap = U1024(self.tick_array_bitmap);
+
+        // Create a mask with a single bit set at the calculated offset
         let mask = U1024::one() << tick_array_offset_in_bitmap.try_into().unwrap();
+
+        // Flip the bit in the bitmap using bitwise XOR (^) operation
         self.tick_array_bitmap = tick_array_bitmap.bitxor(mask).0;
         Ok(())
     }
@@ -430,17 +475,22 @@ impl PoolState {
         tickarray_bitmap_extension: Option<&'c AccountInfo<'info>>,
         tick_array_start_index: i32,
     ) -> Result<()> {
+        // Check if the tick array index overflows the default tick array bitmap
         if self.is_overflow_default_tickarray_bitmap(vec![tick_array_start_index]) {
+            // Ensure the provided tick array bitmap extension account matches the expected key
             require_keys_eq!(
                 tickarray_bitmap_extension.unwrap().key(),
                 TickArrayBitmapExtension::key(self.key())
             );
+
+            // Load the tick array bitmap extension account and flip the bit
             AccountLoader::<TickArrayBitmapExtension>::try_from(
                 tickarray_bitmap_extension.unwrap(),
             )?
             .load_mut()?
             .flip_tick_array_bit(tick_array_start_index, self.tick_spacing)
         } else {
+            // Flip the bit in the default tick array bitmap
             self.flip_tick_array_bit_internal(tick_array_start_index)
         }
     }
@@ -450,8 +500,10 @@ impl PoolState {
         tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
         zero_for_one: bool,
     ) -> Result<(bool, i32)> {
+        // Determine if the current tick overflows the default tick array bitmap
         let (is_initialized, start_index) =
             if self.is_overflow_default_tickarray_bitmap(vec![self.tick_current]) {
+                // If it overflows, check the extended bitmap for initialization
                 tickarray_bitmap_extension
                     .unwrap()
                     .check_tick_array_is_initialized(
@@ -459,24 +511,33 @@ impl PoolState {
                         self.tick_spacing,
                     )?
             } else {
+                // If it does not overflow, check the default bitmap for initialization
                 check_current_tick_array_is_initialized(
                     U1024(self.tick_array_bitmap),
                     self.tick_current,
                     self.tick_spacing.into(),
                 )?
             };
+
+        // If the current tick array is initialized, return its start index
         if is_initialized {
             return Ok((true, start_index));
         }
+
+        // Find the next initialized tick array start index
         let next_start_index = self.next_initialized_tick_array_start_index(
             tickarray_bitmap_extension,
             TickArrayState::get_array_start_index(self.tick_current, self.tick_spacing),
             zero_for_one,
         )?;
+
+        // Ensure that there is a next initialized tick array
         require!(
             next_start_index.is_some(),
             ErrorCode::InsufficientLiquidityForDirection
         );
+
+        // Return the next initialized tick array start index
         return Ok((false, next_start_index.unwrap()));
     }
 
@@ -486,10 +547,12 @@ impl PoolState {
         mut last_tick_array_start_index: i32,
         zero_for_one: bool,
     ) -> Result<Option<i32>> {
+        // Get the array start index for the last tick array start index
         last_tick_array_start_index =
             TickArrayState::get_array_start_index(last_tick_array_start_index, self.tick_spacing);
 
         loop {
+            // Call the function to find the next initialized tick array start index
             let (is_found, start_index) =
                 tick_array_bit_map::next_initialized_tick_array_start_index(
                     U1024(self.tick_array_bitmap),
@@ -497,15 +560,19 @@ impl PoolState {
                     self.tick_spacing,
                     zero_for_one,
                 );
+
+            // If found in the default bitmap, return the start index
             if is_found {
                 return Ok(Some(start_index));
             }
             last_tick_array_start_index = start_index;
 
+            // If not found and there is no extension, return None
             if tickarray_bitmap_extension.is_none() {
                 return err!(ErrorCode::MissingTickArrayBitmapExtensionAccount);
             }
 
+            // If not found, check in the extension bitmap
             let (is_found, start_index) = tickarray_bitmap_extension
                 .unwrap()
                 .next_initialized_tick_array_from_one_bitmap(
@@ -513,11 +580,14 @@ impl PoolState {
                     self.tick_spacing,
                     zero_for_one,
                 )?;
+
+            // If found in the extension bitmap, return the start index
             if is_found {
                 return Ok(Some(start_index));
             }
             last_tick_array_start_index = start_index;
 
+            // If not found in both bitmaps, return None
             if last_tick_array_start_index < tick_math::MIN_TICK
                 || last_tick_array_start_index > tick_math::MAX_TICK
             {

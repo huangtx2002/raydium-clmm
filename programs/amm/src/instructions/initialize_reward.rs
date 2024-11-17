@@ -92,10 +92,15 @@ pub fn initialize_reward(
     ctx: Context<InitializeReward>,
     param: InitializeRewardParam,
 ) -> Result<()> {
+    // Check if the reward token mint is supported
     if !util::is_supported_mint(&ctx.accounts.reward_token_mint).unwrap() {
         return err!(ErrorCode::NotSupportMint);
     }
+
+    // Load the operation state
     let operation_state = ctx.accounts.operation_state.load()?;
+
+    // Ensure the reward funder is authorized
     require!(
         ctx.accounts.reward_funder.key() == crate::admin::id()
             || ctx.accounts.reward_funder.key() == ctx.accounts.pool_state.load()?.owner
@@ -104,11 +109,15 @@ pub fn initialize_reward(
     );
 
     // Clock
+    // Get the current block timestamp
     let clock = Clock::get()?;
     #[cfg(feature = "enable-log")]
     msg!("current block timestamp:{}", clock.unix_timestamp);
+
+    // Check the reward parameters
     param.check(clock.unix_timestamp as u64)?;
 
+    // Calculate the total reward amount
     let reward_amount = U256::from(param.end_time - param.open_time)
         .mul_div_ceil(
             U256::from(param.emissions_per_second_x64),
@@ -116,18 +125,25 @@ pub fn initialize_reward(
         )
         .unwrap()
         .as_u64();
+
+    // Calculate the reward amount including the transfer fee
     let reward_amount_with_transfer_fee = reward_amount
         .checked_add(
             util::get_transfer_inverse_fee(ctx.accounts.reward_token_mint.clone(), reward_amount)
                 .unwrap(),
         )
         .unwrap();
+
+    // Ensure the funder has enough tokens to cover the reward amount with the transfer fee
     require_gte!(
         ctx.accounts.funder_token_account.amount,
         reward_amount_with_transfer_fee
     );
 
+    // Load the mutable reference to the pool state
     let mut pool_state = ctx.accounts.pool_state.load_mut()?;
+
+    // Initialize the reward in the pool state
     pool_state.initialize_reward(
         param.open_time,
         param.end_time,
@@ -138,6 +154,7 @@ pub fn initialize_reward(
         &operation_state,
     )?;
 
+    // Transfer the reward tokens from the funder to the pool's reward vault
     transfer_from_user_to_pool_vault(
         &ctx.accounts.reward_funder,
         &ctx.accounts.funder_token_account,

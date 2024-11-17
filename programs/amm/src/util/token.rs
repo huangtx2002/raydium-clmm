@@ -169,75 +169,106 @@ pub fn close_spl_account<'a, 'b, 'c, 'info>(
 }
 
 pub fn burn<'a, 'b, 'c, 'info>(
-    owner: &Signer<'info>,
-    mint: &InterfaceAccount<'info, Mint>,
-    burn_account: &InterfaceAccount<'info, TokenAccount>,
-    token_program: &Program<'info, Token>,
-    // token_program_2022: &Program<'info, Token2022>,
-    signers_seeds: &[&[&[u8]]],
-    amount: u64,
+    owner: &Signer<'info>, // The owner or authority authorized to burn tokens.
+    mint: &InterfaceAccount<'info, Mint>, // The mint account for the tokens to be burned.
+    burn_account: &InterfaceAccount<'info, TokenAccount>, // The token account to be burned.
+    token_program: &Program<'info, Token>, // Standard token program for burning tokens
+    // token_program_2022: &Program<'info, Token2022>, // Token-2022 program for burning tokens
+    signers_seeds: &[&[&[u8]]], // Signer seeds for program-derived addresses.
+    amount: u64,                // Amount of tokens to burn.
 ) -> Result<()> {
     let mint_info = mint.to_account_info();
     let token_program_info: AccountInfo<'_> = token_program.to_account_info();
     // if mint_info.owner == token_program_2022.key {
     //     token_program_info = token_program_2022.to_account_info()
     // }
+
+    // Perform the burn operation using a cross-program invocation (CPI)
+    // 1. Create a new CPI context with signer seeds (for PDA signing).
+    // 2. Define the Burn context struct, specifying the mint, from account, and authority.
     token_2022::burn(
         CpiContext::new_with_signer(
-            token_program_info,
+            token_program_info, // Program to execute the burn, based on the conditions above
             token_2022::Burn {
-                mint: mint_info,
-                from: burn_account.to_account_info(),
-                authority: owner.to_account_info(),
+                mint: mint_info,                      // Mint account from which the tokens originate
+                from: burn_account.to_account_info(), // Account holding the tokens to burn
+                authority: owner.to_account_info(),   // Authority account authorized to burn tokens
             },
-            signers_seeds,
+            signers_seeds, // Signer seeds required for PDA authorization
         ),
-        amount,
+        amount, // The number of tokens to burn
     )
 }
 
 /// Calculate the fee for output amount
+/// This function calculates the inverse transfer fee based on the given post-fee amount and mint account.
+// If the mint account is not controlled by the Token program, a default fee of 0 is returned.
 pub fn get_transfer_inverse_fee(
-    mint_account: Box<InterfaceAccount<Mint>>,
-    post_fee_amount: u64,
+    mint_account: Box<InterfaceAccount<Mint>>, // mint account that holds the mint data
+    post_fee_amount: u64,                      // the amount after the fee has been applied
 ) -> Result<u64> {
+    // Retrieve account info for the mint account
     let mint_info = mint_account.to_account_info();
+
+    // Check if the mint account is owned by the Token program (sol_token_2022::Token::id)
+    // If it is, there’s no custom fee applied, so we return 0 immediately
     if *mint_info.owner == Token::id() {
         return Ok(0);
     }
+
+    // Attempt to borrow (read) the data from the mint account
     let mint_data = mint_info.try_borrow_data()?;
+
+    // Unpack the mint data into a usable mint object with its extensions
     let mint = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)?;
 
+    // Initialize the fee variable to store the computed fee
     let fee = if let Ok(transfer_fee_config) = mint.get_extension::<TransferFeeConfig>() {
-        let epoch = get_recent_epoch()?;
+        let epoch = get_recent_epoch()?; // Get the current epoch for the fee calculation
 
+        // Retrieve the fee configuration for the current epoch
         let transfer_fee = transfer_fee_config.get_epoch_fee(epoch);
+        // Check if the fee is set to the maximum allowed basis points (in this case, a maximum fixed fee is used)
         if u16::from(transfer_fee.transfer_fee_basis_points) == MAX_FEE_BASIS_POINTS {
             u64::from(transfer_fee.maximum_fee)
         } else {
+            // Calculate the inverse fee based on the given post-fee amount
+            // Unwrap here assumes the calculation will succeed, which should be the case if the fee is set correctly
             transfer_fee_config
                 .calculate_inverse_epoch_fee(epoch, post_fee_amount)
                 .unwrap()
         }
     } else {
-        0
+        0 // If there’s no transfer fee config extension, the fee is 0
     };
+    // Return the computed fee
     Ok(fee)
 }
 
 /// Calculate the fee for input amount
+/// This function calculates the transfer fee based on the given pre-fee amount and mint account.
 pub fn get_transfer_fee(
-    mint_account: Box<InterfaceAccount<Mint>>,
-    pre_fee_amount: u64,
+    mint_account: Box<InterfaceAccount<Mint>>, // mint account holding mint data
+    pre_fee_amount: u64,                       // the amount before the fee is applied
 ) -> Result<u64> {
+    // returns a Result with the fee amount or an error if the fee calculation fails
+    // Retrieve account info for the mint account
     let mint_info = mint_account.to_account_info();
+    // Check if the mint account is owned by the standard Token program
+    // If it is, then no custom transfer fee applies, so we return 0
     if *mint_info.owner == Token::id() {
         return Ok(0);
     }
+
+    // Attempt to borrow (read) the data from the mint account
     let mint_data = mint_info.try_borrow_data()?;
+    // Unpack the mint data to access the mint account's state with potential extensions
     let mint = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)?;
 
+    // Initialize the fee variable to calculate the transfer fee if a TransferFeeConfig is found
     let fee = if let Ok(transfer_fee_config) = mint.get_extension::<TransferFeeConfig>() {
+        // Calculate the fee for the given amount based on the current epoch
+        // Uses the configured epoch fee for this amount, and unwraps as it's expected to succeed
         transfer_fee_config
             .calculate_epoch_fee(get_recent_epoch()?, pre_fee_amount)
             .unwrap()
@@ -247,25 +278,44 @@ pub fn get_transfer_fee(
     Ok(fee)
 }
 
+// This function checks if a mint account is supported based on ownership, whitelist, or allowed extensions.
 pub fn is_supported_mint(mint_account: &InterfaceAccount<Mint>) -> Result<bool> {
+    // Retrieve account information for the mint account
     let mint_info = mint_account.to_account_info();
+    // Check if the mint account is owned by the Token program
+    // If it is, we consider it supported, so return true
     if *mint_info.owner == Token::id() {
         return Ok(true);
     }
+
+    // Define a whitelist of mint accounts that are explicitly supported
     let mint_whitelist: HashSet<&str> = MINT_WHITELIST.into_iter().collect();
+
+    // Check if the mint account's key is in the whitelist
+    // If it is, return true to indicate it’s supported
     if mint_whitelist.contains(mint_account.key().to_string().as_str()) {
         return Ok(true);
     }
+
+    // Try to borrow (read) data from the mint account for further checks
     let mint_data = mint_info.try_borrow_data()?;
+
+    // Unpack the mint data to access the mint's state with potential extensions
     let mint = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)?;
+
+    // Retrieve a list of all extension types associated with this mint account
     let extensions = mint.get_extension_types()?;
+
+    // Check each extension type to ensure it’s within allowed types
     for e in extensions {
         if e != ExtensionType::TransferFeeConfig
             && e != ExtensionType::MetadataPointer
             && e != ExtensionType::TokenMetadata
         {
+            // If any extension is not one of the allowed types, return false
             return Ok(false);
         }
     }
+    // If all extensions are allowed types or if there are no disallowed extensions, return true
     Ok(true)
 }

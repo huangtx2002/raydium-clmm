@@ -13,6 +13,9 @@ use std::ops::BitXor;
 
 const EXTENSION_TICKARRAY_BITMAP_SIZE: usize = 14;
 
+/// Tick array bitmap extension
+/// A bitmap is a data structure that uses bits to represent the presence or absence of elements in a set. Each bit in the bitmap corresponds to a specific element, and the value of the bit (0 or 1) indicates whether the element is present or absent.
+
 #[account(zero_copy(unsafe))]
 #[repr(packed)]
 #[derive(Debug)]
@@ -77,6 +80,7 @@ impl TickArrayBitmapExtension {
     }
 
     /// Check if the tick in tick array bitmap extension
+    /// ensure the tick is in the boundary of the tick array bitmap extension
     pub fn check_extension_boundary(tick_index: i32, tick_spacing: u16) -> Result<()> {
         let positive_tick_boundary = max_tick_in_tickarray_bitmap(tick_spacing);
         let negative_tick_boundary = -positive_tick_boundary;
@@ -94,14 +98,19 @@ impl TickArrayBitmapExtension {
         tick_array_start_index: i32,
         tick_spacing: u16,
     ) -> Result<(bool, i32)> {
+        // Get the bitmap and offset for the given tick array start index
         let (_, tickarray_bitmap) = self.get_bitmap(tick_array_start_index, tick_spacing)?;
 
+        // Calculate the offset of the tick array in the bitmap
         let tick_array_offset_in_bitmap =
             Self::tick_array_offset_in_bitmap(tick_array_start_index, tick_spacing);
 
+        // Check if the bit at the calculated offset is set in the bitmap
         if U512(tickarray_bitmap).bit(tick_array_offset_in_bitmap as usize) {
+            // If the bit is set, the tick array is initialized
             return Ok((true, tick_array_start_index));
         }
+        // If the bit is not set, the tick array is not initialized
         Ok((false, tick_array_start_index))
     }
 
@@ -111,20 +120,33 @@ impl TickArrayBitmapExtension {
         tick_array_start_index: i32,
         tick_spacing: u16,
     ) -> Result<()> {
+        // Get the bitmap and offset for the given tick array start index
         let (offset, tick_array_bitmap) = self.get_bitmap(tick_array_start_index, tick_spacing)?;
+
+        // Calculate the offset of the tick array in the bitmap
         let tick_array_offset_in_bitmap =
             Self::tick_array_offset_in_bitmap(tick_array_start_index, tick_spacing);
+
+        // Convert the tick array bitmap to a U512 type for bitwise operations
         let tick_array_bitmap = U512(tick_array_bitmap);
+
+        // Create a mask with a single bit set at the calculated offset
         let mask = U512::one() << tick_array_offset_in_bitmap;
+
+        // Flip the bit in the bitmap using bitwise XOR (^) operation
         if tick_array_start_index < 0 {
+            // If the tick array start index is negative, update the negative tick array bitmap
             self.negative_tick_array_bitmap[offset as usize] = tick_array_bitmap.bitxor(mask).0;
         } else {
+            // If the tick array start index is positive, update the positive tick array bitmap
             self.positive_tick_array_bitmap[offset as usize] = tick_array_bitmap.bitxor(mask).0;
         }
+
+        // Return Ok to indicate success
         Ok(())
     }
 
-    /// Search for the first initialized bit in bitmap according to the direction, if found return ture and the tick array start index,
+    /// Search for the first initialized bit in bitmap according to the direction, if found return true and the tick array start index,
     /// if not, return false and tick boundary index
     pub fn next_initialized_tick_array_from_one_bitmap(
         &self,
@@ -132,17 +154,25 @@ impl TickArrayBitmapExtension {
         tick_spacing: u16,
         zero_for_one: bool,
     ) -> Result<(bool, i32)> {
+        // Calculate the number of ticks in one tick array
         let multiplier = TickArrayState::tick_count(tick_spacing);
+
+        // Determine the next tick array start index based on the direction
         let next_tick_array_start_index = if zero_for_one {
+            // Move to the previous tick array (negative direction)
             last_tick_array_start_index - multiplier
         } else {
+            // Move to the next tick array (positive direction)
             last_tick_array_start_index + multiplier
         };
+
+        // Calculate the minimum and maximum tick array start indices for the given tick spacing
         let min_tick_array_start_index =
             TickArrayState::get_array_start_index(tick_math::MIN_TICK, tick_spacing);
         let max_tick_array_start_index =
             TickArrayState::get_array_start_index(tick_math::MAX_TICK, tick_spacing);
 
+        // Check if the next tick array start index is out of bounds
         if next_tick_array_start_index < min_tick_array_start_index
             || next_tick_array_start_index > max_tick_array_start_index
         {
@@ -165,9 +195,11 @@ impl TickArrayBitmapExtension {
         tick_spacing: u16,
         zero_for_one: bool,
     ) -> (bool, i32) {
+        // Get the bitmap tick boundaries based on the next tick array start index and tick spacing
         let (bitmap_min_tick_boundary, bitmap_max_tick_boundary) =
             get_bitmap_tick_boundary(next_tick_array_start_index, tick_spacing);
 
+        // Calculate the offset of the tick array in the bitmap
         let tick_array_offset_in_bitmap =
             Self::tick_array_offset_in_bitmap(next_tick_array_start_index, tick_spacing);
         if zero_for_one {
@@ -214,12 +246,20 @@ impl TickArrayBitmapExtension {
         }
     }
 
+    /// Calculate the offset of the tick array in the bitmap
     pub fn tick_array_offset_in_bitmap(tick_array_start_index: i32, tick_spacing: u16) -> i32 {
+        // Calculate the absolute value of the tick array start index modulo the maximum tick in the tick array bitmap
         let m = tick_array_start_index.abs() % max_tick_in_tickarray_bitmap(tick_spacing);
+
+        // Calculate the initial offset of the tick array in the bitmap
         let mut tick_array_offset_in_bitmap = m / TickArrayState::tick_count(tick_spacing);
+
+        // Adjust the offset if the tick array start index is negative and not a multiple of the tick count
         if tick_array_start_index < 0 && m != 0 {
             tick_array_offset_in_bitmap = TICK_ARRAY_BITMAP_SIZE - tick_array_offset_in_bitmap;
         }
+
+        // Return the calculated offset
         tick_array_offset_in_bitmap
     }
 }

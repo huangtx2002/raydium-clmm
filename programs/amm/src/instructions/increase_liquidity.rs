@@ -264,17 +264,26 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
     amount_1_max: u64,
     base_flag: Option<bool>,
 ) -> Result<()> {
+    // Ensure the liquidity to be increased is valid
     let mut liquidity = liquidity;
+
+    // Load the mutable reference to the pool state
     let pool_state = &mut pool_state_loader.load_mut()?;
+
+    // Check if the pool allows opening a position or increasing liquidity
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::OpenPositionOrIncreaseLiquidity) {
         return err!(ErrorCode::NotApproved);
     }
+
+    // Get the lower and upper tick indices from the personal position
     let tick_lower = personal_position.tick_lower_index;
     let tick_upper = personal_position.tick_upper_index;
 
+    // Check if the tick array bitmap extension is needed
     let use_tickarray_bitmap_extension =
         pool_state.is_overflow_default_tickarray_bitmap(vec![tick_lower, tick_upper]);
 
+    // Add liquidity to the pool and get the amounts and transfer fees
     let (amount_0, amount_1, amount_0_transfer_fee, amount_1_transfer_fee) = add_liquidity(
         &nft_owner,
         token_account_0,
@@ -306,12 +315,15 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         base_flag,
     )?;
 
+    // Update the user's token fees owed for token_0
     personal_position.token_fees_owed_0 = calculate_latest_token_fees(
         personal_position.token_fees_owed_0,
         personal_position.fee_growth_inside_0_last_x64,
         protocol_position.fee_growth_inside_0_last_x64,
         personal_position.liquidity,
     );
+
+    // Update the user's token fees owed for token_1
     personal_position.token_fees_owed_1 = calculate_latest_token_fees(
         personal_position.token_fees_owed_1,
         personal_position.fee_growth_inside_1_last_x64,
@@ -319,13 +331,17 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         personal_position.liquidity,
     );
 
+    // Update the user's fee growth inside last values
     personal_position.fee_growth_inside_0_last_x64 = protocol_position.fee_growth_inside_0_last_x64;
     personal_position.fee_growth_inside_1_last_x64 = protocol_position.fee_growth_inside_1_last_x64;
 
     // update rewards, must update before increase liquidity
     personal_position.update_rewards(protocol_position.reward_growth_inside, true)?;
+
+    // Increase the user's liquidity
     personal_position.liquidity = personal_position.liquidity.checked_add(liquidity).unwrap();
 
+    // Emit an event with the details of the liquidity increase
     emit!(IncreaseLiquidityEvent {
         position_nft_mint: personal_position.nft_mint,
         liquidity,

@@ -79,7 +79,10 @@ impl ObservationState {
     /// * `self` - The ObservationState account to write in
     /// * `block_timestamp` - The current timestamp of to update
     ///
+    // This function updates a record of observations with a new block timestamp and tick value.
+    // It either initializes the observation on the first run or updates it based on time intervals.
     pub fn update(&mut self, block_timestamp: u32, tick: i32) {
+        // Retrieve the current observation index
         let observation_index = self.observation_index;
         if !self.initialized {
             self.initialized = true;

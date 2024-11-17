@@ -86,6 +86,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
 ) -> Result<u64> {
     // invoke_memo_instruction(SWAP_MEMO_MSG, ctx.memo_program.to_account_info())?;
 
+    // Get the current block timestamp
     let block_timestamp = solana_program::clock::Clock::get()?.unix_timestamp as u64;
 
     let amount_0;
@@ -93,6 +94,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
     let zero_for_one;
     let swap_price_before;
 
+    // Store the input and output token account balances before the swap
     let input_balance_before = ctx.input_token_account.amount;
     let output_balance_before = ctx.output_token_account.amount;
 
@@ -109,12 +111,15 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
     };
 
     {
+        // Load the pool state and store the initial swap price
         swap_price_before = ctx.pool_state.load()?.sqrt_price_x64;
         let pool_state = &mut ctx.pool_state.load_mut()?;
         zero_for_one = ctx.input_vault.mint == pool_state.token_mint_0;
 
+        // Ensure the swap is allowed based on the pool's open time
         require_gt!(block_timestamp, pool_state.open_time);
 
+        // Ensure the input and output vaults match the pool's configuration
         require!(
             if zero_for_one {
                 ctx.input_vault.key() == pool_state.token_vault_0
@@ -126,9 +131,11 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             ErrorCode::InvalidInputPoolVault
         );
 
+        // Initialize the tick array states and bitmap extension
         let mut tickarray_bitmap_extension = None;
         let tick_array_states = &mut VecDeque::new();
 
+        // Load the tick array bitmap extension if it exists
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
         for account_info in remaining_accounts.into_iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
@@ -142,6 +149,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             tick_array_states.push_back(AccountLoad::load_data_mut(account_info)?);
         }
 
+        // Perform the swap using the swap_internal function
         (amount_0, amount_1) = swap_internal(
             &ctx.amm_config,
             pool_state,
@@ -170,11 +178,15 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             amount_0,
             amount_1
         );
+
+        // Ensure the swap amounts are non-zero
         require!(
             amount_0 != 0 && amount_1 != 0,
             ErrorCode::TooSmallInputOrOutputAmount
         );
     }
+
+    // Determine the token accounts and vaults based on the swap direction
     let (token_account_0, token_account_1, vault_0, vault_1, vault_0_mint, vault_1_mint) =
         if zero_for_one {
             (
@@ -221,6 +233,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             transfer_fee_1
         );
         //  x -> y, deposit x token from user to pool vault.
+        // Transfer input tokens from the user to the pool vault
         transfer_from_user_to_pool_vault(
             &ctx.payer,
             &token_account_0,
@@ -230,11 +243,13 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             Some(ctx.token_program_2022.to_account_info()),
             transfer_amount_0,
         )?;
+        // Check if the pool has sufficient output tokens
         if vault_1.amount <= transfer_amount_1 {
             // freeze pool, disable all instructions
             ctx.pool_state.load_mut()?.set_status(255);
         }
         // x -> y，transfer y token from pool vault to user.
+        // Transfer output tokens from the pool vault to the user
         transfer_from_pool_vault_to_user(
             &ctx.pool_state,
             &vault_1,
@@ -259,6 +274,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             amount_1,
             transfer_fee_1
         );
+        // Transfer input tokens from the user to the pool vault
         transfer_from_user_to_pool_vault(
             &ctx.payer,
             &token_account_1,
@@ -268,10 +284,12 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             Some(ctx.token_program_2022.to_account_info()),
             transfer_amount_1,
         )?;
+        // Check if the pool has sufficient output tokens
         if vault_0.amount <= transfer_amount_0 {
             // freeze pool, disable all instructions
             ctx.pool_state.load_mut()?.set_status(255);
         }
+        // Transfer output tokens from the pool vault to the user
         transfer_from_pool_vault_to_user(
             &ctx.pool_state,
             &vault_0,
@@ -282,9 +300,12 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             transfer_amount_0,
         )?;
     }
+
+    // Reload the token account balances after the transfers
     ctx.output_token_account.reload()?;
     ctx.input_token_account.reload()?;
 
+    // Emit a swap event with the details of the swap
     let pool_state = ctx.pool_state.load()?;
     emit!(SwapEvent {
         pool_state: pool_state.key(),
@@ -300,11 +321,15 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
         liquidity: pool_state.liquidity,
         tick: pool_state.tick_current
     });
+
+    // Ensure the swap price has changed as expected
     if zero_for_one {
         require_gt!(swap_price_before, pool_state.sqrt_price_x64);
     } else {
         require_gt!(pool_state.sqrt_price_x64, swap_price_before);
     }
+
+    // Ensure the entire specified amount was swapped if no price limit was set
     if sqrt_price_limit_x64 == 0 {
         // Does't allow partial filled without specified limit_price.
         if is_base_input {
@@ -322,6 +347,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
         }
     }
 
+    // Return the amount of tokens received by the user
     if is_base_input {
         Ok(ctx
             .output_token_account

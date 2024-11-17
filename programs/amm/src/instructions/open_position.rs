@@ -450,13 +450,21 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
     with_matedata: bool,
     base_flag: Option<bool>,
 ) -> Result<()> {
+    // Initialize liquidity
     let mut liquidity = liquidity;
     {
+        // Load the mutable reference to the pool state
         let pool_state = &mut pool_state_loader.load_mut()?;
+
+        // Check if the pool allows opening a position or increasing liquidity
         if !pool_state.get_status_by_bit(PoolStatusBitIndex::OpenPositionOrIncreaseLiquidity) {
             return err!(ErrorCode::NotApproved);
         }
+
+        // Check the order of the ticks
         check_ticks_order(tick_lower_index, tick_upper_index)?;
+
+        // Check the start index of the tick arrays
         check_tick_array_start_index(
             tick_array_lower_start_index,
             tick_lower_index,
@@ -471,6 +479,7 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
         // Why not use anchor's `init-if-needed` to create?
         // Beacuse `tick_array_lower` and `tick_array_upper` can be the same account, anchor can initialze tick_array_lower but it causes a crash when anchor to initialze the `tick_array_upper`,
         // the problem is variable scope, tick_array_lower_loader not exit to save the discriminator while build tick_array_upper_loader.
+        // Create or load the tick arrays
         let tick_array_lower_loader = TickArrayState::get_or_create_tick_array(
             payer.to_account_info(),
             tick_array_lower_loader.to_account_info(),
@@ -511,11 +520,13 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
                 .tick = tick_upper_index;
         }
 
+        // Check if the tick array bitmap extension is needed
         let use_tickarray_bitmap_extension = pool_state.is_overflow_default_tickarray_bitmap(vec![
             tick_array_lower_start_index,
             tick_array_upper_start_index,
         ]);
 
+        // Add liquidity to the pool
         let (amount_0, amount_1, amount_0_transfer_fee, amount_1_transfer_fee) = add_liquidity(
             payer,
             token_account_0,
@@ -547,6 +558,7 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
             base_flag,
         )?;
 
+        // Initialize the personal position
         // let personal_position = &mut personal_position;
         personal_position.bump = personal_position_bump;
         personal_position.nft_mint = position_nft_mint.key();
@@ -563,6 +575,7 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
         personal_position.update_rewards(protocol_position.reward_growth_inside, false)?;
         personal_position.liquidity = liquidity;
 
+        // Emit an event for the creation of the personal position
         emit!(CreatePersonalPositionEvent {
             pool_state: pool_state_loader.key(),
             minter: payer.key(),
@@ -576,6 +589,8 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
             deposit_amount_1_transfer_fee: amount_1_transfer_fee
         });
     }
+
+    // Create the NFT with metadata
     create_nft_with_metadata(
         payer,
         pool_state_loader,
@@ -615,6 +630,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
     tick_upper_index: i32,
     base_flag: Option<bool>,
 ) -> Result<(u64, u64, u64, u64)> {
+    // If liquidity is zero, calculate initial liquidity based on the base flag
     if *liquidity == 0 {
         if base_flag.is_none() {
             // when establishing a new position , liquidity allows for further additions
@@ -623,6 +639,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         if base_flag.unwrap() {
             // must deduct transfer fee before calculate liquidity
             // because only v2 instruction support token_2022, vault_0_mint must be exist
+            // Calculate liquidity from amount_0, deducting transfer fee
             let amount_0_transfer_fee =
                 get_transfer_fee(vault_0_mint.clone().unwrap(), amount_0_max).unwrap();
             *liquidity = liquidity_math::get_liquidity_from_single_amount_0(
@@ -641,6 +658,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         } else {
             // must deduct transfer fee before calculate liquidity
             // because only v2 instruction support token_2022, vault_1_mint must be exist
+            // Calculate liquidity from amount_1, deducting transfer fee
             let amount_1_transfer_fee =
                 get_transfer_fee(vault_1_mint.clone().unwrap(), amount_1_max).unwrap();
             *liquidity = liquidity_math::get_liquidity_from_single_amount_1(
@@ -658,25 +676,38 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
             );
         }
     }
+
+    // Ensure liquidity is greater than zero
     assert!(*liquidity > 0);
+
+    // Store the pool's liquidity before the operation
     let liquidity_before = pool_state.liquidity;
+
+    // Ensure the tick arrays are associated with the correct pool
     require_keys_eq!(tick_array_lower_loader.load()?.pool_id, pool_state.key());
     require_keys_eq!(tick_array_upper_loader.load()?.pool_id, pool_state.key());
 
     // get tick_state
+    // Load and get mutable references to the tick states for the lower and upper ticks
     let mut tick_lower_state = *tick_array_lower_loader
         .load_mut()?
         .get_tick_state_mut(tick_lower_index, pool_state.tick_spacing)?;
     let mut tick_upper_state = *tick_array_upper_loader
         .load_mut()?
         .get_tick_state_mut(tick_upper_index, pool_state.tick_spacing)?;
+
+    // Initialize tick states if they are not already set
     if tick_lower_state.tick == 0 {
         tick_lower_state.tick = tick_lower_index;
     }
     if tick_upper_state.tick == 0 {
         tick_upper_state.tick = tick_upper_index;
     }
+
+    // Get the current timestamp
     let clock = Clock::get()?;
+
+    // Modify the position and get the amounts and flip status of the ticks
     let (amount_0, amount_1, flip_tick_lower, flip_tick_upper) = modify_position(
         i128::try_from(*liquidity).unwrap(),
         pool_state,
@@ -687,6 +718,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
     )?;
 
     // update tick_state
+    // Update the tick states in the tick array loaders
     tick_array_lower_loader.load_mut()?.update_tick_state(
         tick_lower_index,
         pool_state.tick_spacing,
@@ -698,6 +730,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         tick_upper_state,
     )?;
 
+    // Handle flipping of the lower tick
     if flip_tick_lower {
         let mut tick_array_lower = tick_array_lower_loader.load_mut()?;
         let before_init_tick_count = tick_array_lower.initialized_tick_count;
@@ -710,6 +743,8 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
             )?;
         }
     }
+
+    // Handle flipping of the upper tick
     if flip_tick_upper {
         let mut tick_array_upper = tick_array_upper_loader.load_mut()?;
         let before_init_tick_count = tick_array_upper.initialized_tick_count;
@@ -722,11 +757,14 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
             )?;
         }
     }
+
+    // Ensure that at least one of the amounts is greater than zero
     require!(
         amount_0 > 0 || amount_1 > 0,
         ErrorCode::ForbidBothZeroForSupplyLiquidity
     );
 
+    // Calculate transfer fees for token_0 and token_1
     let mut amount_0_transfer_fee = 0;
     let mut amount_1_transfer_fee = 0;
     if vault_0_mint.is_some() {
@@ -737,6 +775,8 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         amount_1_transfer_fee =
             get_transfer_inverse_fee(vault_1_mint.clone().unwrap(), amount_1).unwrap();
     }
+
+    // Emit an event with the calculated liquidity and fees
     emit!(LiquidityCalculateEvent {
         pool_liquidity: liquidity_before,
         pool_sqrt_price_x64: pool_state.sqrt_price_x64,
@@ -748,6 +788,8 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         transfer_fee_0: amount_0_transfer_fee,
         transfer_fee_1: amount_1_transfer_fee,
     });
+
+    // Log the details if logging is enabled
     #[cfg(feature = "enable-log")]
     msg!(
         "amount_0: {}, amount_0_transfer_fee: {}, amount_1: {}, amount_1_transfer_fee: {}",
@@ -756,6 +798,8 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         amount_1,
         amount_1_transfer_fee
     );
+
+    // Ensure the amounts after fees meet the maximum allowed amounts
     require_gte!(
         amount_0_max,
         amount_0 + amount_0_transfer_fee,
@@ -766,10 +810,14 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         amount_1 + amount_1_transfer_fee,
         ErrorCode::PriceSlippageCheck
     );
+
+    // Optionally include the token program 2022
     let mut token_2022_program_opt: Option<AccountInfo> = None;
     if token_program_2022.is_some() {
         token_2022_program_opt = Some(token_program_2022.clone().unwrap().to_account_info());
     }
+
+    // Transfer the amounts from the user to the pool vaults
     transfer_from_user_to_pool_vault(
         payer,
         token_account_0,
@@ -789,6 +837,8 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         token_2022_program_opt.clone(),
         amount_1 + amount_1_transfer_fee,
     )?;
+
+    // Emit an event with the details of the liquidity change
     emit!(LiquidityChangeEvent {
         pool_state: pool_state.key(),
         tick: pool_state.tick_current,
@@ -797,6 +847,8 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         liquidity_before: liquidity_before,
         liquidity_after: pool_state.liquidity,
     });
+
+    // Return the amounts and transfer fees
     Ok((
         amount_0,
         amount_1,
@@ -813,6 +865,7 @@ pub fn modify_position(
     tick_upper_state: &mut TickState,
     timestamp: u64,
 ) -> Result<(u64, u64, bool, bool)> {
+    // Update the position and get the flip status of the lower and upper ticks
     let (flip_tick_lower, flip_tick_upper) = update_position(
         liquidity_delta,
         pool_state,
@@ -821,10 +874,14 @@ pub fn modify_position(
         tick_upper_state,
         timestamp,
     )?;
+
+    // Initialize the amounts of token_0 and token_1
     let mut amount_0 = 0;
     let mut amount_1 = 0;
 
+    // If the liquidity delta is non-zero, calculate the amounts and update the pool's liquidity
     if liquidity_delta != 0 {
+        // Calculate the delta amounts of token_0 and token_1 based on the liquidity delta
         (amount_0, amount_1) = liquidity_math::get_delta_amounts_signed(
             pool_state.tick_current,
             pool_state.sqrt_price_x64,
@@ -832,6 +889,8 @@ pub fn modify_position(
             tick_upper_state.tick,
             liquidity_delta,
         )?;
+
+        // Update the pool's liquidity if the current tick is within the tick range
         if pool_state.tick_current >= tick_lower_state.tick
             && pool_state.tick_current < tick_upper_state.tick
         {
@@ -840,6 +899,7 @@ pub fn modify_position(
         }
     }
 
+    // Return the amounts of token_0 and token_1, and the flip status of the lower and upper ticks
     Ok((amount_0, amount_1, flip_tick_lower, flip_tick_upper))
 }
 
@@ -852,6 +912,7 @@ pub fn update_position(
     tick_upper_state: &mut TickState,
     timestamp: u64,
 ) -> Result<(bool, bool)> {
+    // Update the reward information in the pool state based on the current timestamp
     let updated_reward_infos = pool_state.update_reward_infos(timestamp)?;
 
     let mut flipped_lower = false;
@@ -859,7 +920,7 @@ pub fn update_position(
 
     // update the ticks if liquidity delta is non-zero
     if liquidity_delta != 0 {
-        // Update tick state and find if tick is flipped
+        // Update the lower tick state and check if it is flipped
         flipped_lower = tick_lower_state.update(
             pool_state.tick_current,
             liquidity_delta,
@@ -868,6 +929,7 @@ pub fn update_position(
             false,
             &updated_reward_infos,
         )?;
+        // Update the upper tick state and check if it is flipped
         flipped_upper = tick_upper_state.update(
             pool_state.tick_current,
             liquidity_delta,
@@ -884,7 +946,7 @@ pub fn update_position(
         );
     }
 
-    // Update fees
+    // Update the fee growth inside the tick range
     let (fee_growth_inside_0_x64, fee_growth_inside_1_x64) = tick_array::get_fee_growth_inside(
         tick_lower_state.deref(),
         tick_upper_state.deref(),
@@ -893,7 +955,7 @@ pub fn update_position(
         pool_state.fee_growth_global_1_x64,
     );
 
-    // Update reward outside if needed
+    // Update the reward growth inside the tick range if needed
     let reward_growths_inside = tick_array::get_reward_growths_inside(
         tick_lower_state.deref(),
         tick_upper_state.deref(),
@@ -901,6 +963,7 @@ pub fn update_position(
         &updated_reward_infos,
     );
 
+    // Update the protocol position state with the new values
     protocol_position_state.update(
         tick_lower_state.tick,
         tick_upper_state.tick,
@@ -909,6 +972,8 @@ pub fn update_position(
         fee_growth_inside_1_x64,
         reward_growths_inside,
     )?;
+
+    // Clear the tick states if liquidity is decreased and the ticks are flipped
     if liquidity_delta < 0 {
         if flipped_lower {
             tick_lower_state.clear();
@@ -917,6 +982,8 @@ pub fn update_position(
             tick_upper_state.clear();
         }
     }
+
+    // Return whether the lower and upper ticks were flipped
     Ok((flipped_lower, flipped_upper))
 }
 
@@ -935,7 +1002,9 @@ fn create_nft_with_metadata<'info>(
     rent: &Sysvar<'info, Rent>,
     with_matedata: bool,
 ) -> Result<()> {
+    // Load the pool state
     let pool_state = pool_state_loader.load()?;
+    // Get the seeds for the pool state
     let seeds = pool_state.seeds();
     // Mint the NFT
     token::mint_to(
@@ -950,6 +1019,8 @@ fn create_nft_with_metadata<'info>(
         ),
         1,
     )?;
+
+    // If metadata is required, create the metadata account
     if with_matedata {
         let create_metadata_ix = create_metadata_accounts_v3(
             metadata_program.key(),
@@ -973,6 +1044,8 @@ fn create_nft_with_metadata<'info>(
             None,
             None,
         );
+
+        // Invoke the instruction to create the metadata account
         solana_program::program::invoke_signed(
             &create_metadata_ix,
             &[
@@ -986,7 +1059,8 @@ fn create_nft_with_metadata<'info>(
             &[&seeds],
         )?;
     }
-    // Disable minting
+
+    // Disable further minting of the NFT
     token_2022::set_authority(
         CpiContext::new_with_signer(
             token_program.to_account_info(),

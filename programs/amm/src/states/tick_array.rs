@@ -49,12 +49,15 @@ impl TickArrayState {
         tick_array_start_index: i32,
         tick_spacing: u16,
     ) -> Result<AccountLoad<'info, TickArrayState>> {
+        // Ensure the tick_array_start_index is valid
         require!(
             TickArrayState::check_is_valid_start_index(tick_array_start_index, tick_spacing),
             ErrorCode::InvaildTickIndex
         );
 
+        // Check if the tick array account already exists
         let tick_array_state = if tick_array_account_info.owner == &system_program::ID {
+            // Calculate the expected PDA (Program Derived Address) for the tick array
             let (expect_pda_address, bump) = Pubkey::find_program_address(
                 &[
                     TICK_ARRAY_SEED.as_bytes(),
@@ -63,7 +66,9 @@ impl TickArrayState {
                 ],
                 &crate::id(),
             );
+            // Ensure the provided account matches the expected PDA
             require_keys_eq!(expect_pda_address, tick_array_account_info.key());
+            // Create or allocate the account if it doesn't exist
             create_or_allocate_account(
                 &crate::id(),
                 payer,
@@ -77,6 +82,7 @@ impl TickArrayState {
                 ],
                 TickArrayState::LEN,
             )?;
+            // Load the newly created tick array state
             let tick_array_state_loader = AccountLoad::<TickArrayState>::try_from_unchecked(
                 &crate::id(),
                 &tick_array_account_info,
@@ -91,6 +97,7 @@ impl TickArrayState {
             }
             tick_array_state_loader
         } else {
+            // Load the existing tick array state
             AccountLoad::<TickArrayState>::try_from(&tick_array_account_info)?
         };
         Ok(tick_array_state)
@@ -214,34 +221,58 @@ impl TickArrayState {
     }
 
     /// Base on swap directioin, return the next tick array start index.
-    pub fn next_tick_arrary_start_index(&self, tick_spacing: u16, zero_for_one: bool) -> i32 {
-        let ticks_in_array = TICK_ARRAY_SIZE * i32::from(tick_spacing);
+    pub fn next_tick_arrary_start_index(
+        &self,
+        current_tick_index: i32,
+        tick_spacing: u16,
+        zero_for_one: bool,
+    ) -> i32 {
+        // Calculate the number of ticks in one tick array
+        let ticks_in_array = TickArrayState::tick_count(tick_spacing);
+
+        // Determine the direction of the swap
         if zero_for_one {
-            self.start_tick_index - ticks_in_array
+            // Swap from token 0 to token 1
+            // Move to the next tick array in the negative direction
+            current_tick_index - ticks_in_array
         } else {
-            self.start_tick_index + ticks_in_array
+            // Swap from token 1 to token 0
+            // Move to the next tick array in the positive direction
+            current_tick_index + ticks_in_array
         }
     }
 
     /// Input an arbitrary tick_index, output the start_index of the tick_array it sits on
     pub fn get_array_start_index(tick_index: i32, tick_spacing: u16) -> i32 {
+        // Calculate the number of ticks in one tick array
         let ticks_in_array = TickArrayState::tick_count(tick_spacing);
+
+        // Calculate the start index of the tick array that contains the given tick_index
         let mut start = tick_index / ticks_in_array;
+
+        // Adjust the start index if the tick_index is negative and not a multiple of ticks_in_array
         if tick_index < 0 && tick_index % ticks_in_array != 0 {
-            start = start - 1
+            start = start - 1;
         }
+
+        // Return the start index of the tick array
         start * ticks_in_array
     }
 
     pub fn check_is_valid_start_index(tick_index: i32, tick_spacing: u16) -> bool {
+        // Check if the tick_index is out of the valid boundary
         if TickState::check_is_out_of_boundary(tick_index) {
+            // If the tick_index is greater than the maximum allowed tick, return false
             if tick_index > tick_math::MAX_TICK {
                 return false;
             }
+            // Calculate the minimum start index for the tick array
             let min_start_index =
                 TickArrayState::get_array_start_index(tick_math::MIN_TICK, tick_spacing);
+            // Check if the tick_index is equal to the minimum start index
             return tick_index == min_start_index;
         }
+        // Check if the tick_index is a valid start index by ensuring it is a multiple of the tick count
         tick_index % TickArrayState::tick_count(tick_spacing) == 0
     }
 
@@ -268,7 +299,7 @@ impl Default for TickArrayState {
 #[repr(packed)]
 #[derive(Default, Debug)]
 pub struct TickState {
-    pub tick: i32,
+    pub tick: i32, // The specific tick or price point
     /// Amount of net liquidity added (subtracted) when tick is crossed from left to right (right to left)
     pub liquidity_net: i128,
     /// The total position liquidity that references this tick
@@ -276,6 +307,7 @@ pub struct TickState {
 
     /// Fee growth per unit of liquidity on the _other_ side of this tick (relative to the current tick)
     /// only has relative meaning, not absolute — the value depends on when the tick is initialized
+    /// the term outside indicates that the fee growth being tracked is on the opposite side of the current tick relative to the position of the liquidity provider.
     pub fee_growth_outside_0_x64: u128,
     pub fee_growth_outside_1_x64: u128,
 
@@ -340,30 +372,49 @@ impl TickState {
 
     /// Transitions to the current tick as needed by price movement, returning the amount of liquidity
     /// added (subtracted) when tick is crossed from left to right (right to left)
+    /// It returns the amount of liquidity added or subtracted when the tick is crossed:
+    /// - Positive liquidity: when moving from left to right
+    /// - Negative liquidity: when moving from right to left
     pub fn cross(
         &mut self,
-        fee_growth_global_0_x64: u128,
-        fee_growth_global_1_x64: u128,
-        reward_infos: &[RewardInfo; REWARD_NUM],
+        fee_growth_global_0_x64: u128, // The current global accumulated fees for token 0, represented in 64-bit fixed-point format.
+        fee_growth_global_1_x64: u128, // The current global accumulated fees for token 1, represented in 64-bit fixed-point format.
+        reward_infos: &[RewardInfo; REWARD_NUM], // Array of reward info data, where each element stores reward growth data for a specific reward.
     ) -> i128 {
+        // Update `fee_growth_outside_0_x64` by calculating the difference between
+        // the current global fee growth for token 0 and the current tick's outside growth.
+        // The result will be assigned to `fee_growth_outside_0_x64` and it will store
+        // the portion of fees accumulated outside this tick boundary.
         self.fee_growth_outside_0_x64 = fee_growth_global_0_x64
-            .checked_sub(self.fee_growth_outside_0_x64)
-            .unwrap();
+            .checked_sub(self.fee_growth_outside_0_x64) // Safe subtraction to prevent overflow
+            .unwrap(); // Unwrap is used because we expect no overflow, so we assume the operation will succeed.
+
+        // Similarly, update `fee_growth_outside_1_x64` by calculating the difference between
+        // the current global fee growth for token 1 and the current tick's outside growth.
         self.fee_growth_outside_1_x64 = fee_growth_global_1_x64
             .checked_sub(self.fee_growth_outside_1_x64)
             .unwrap();
 
+        // Loop through each reward in `reward_infos`, updating the reward growth outside
+        // this tick for each one.
         for i in 0..REWARD_NUM {
+            // Check if the current reward is initialized.
+            // If it's not initialized, skip it.
             if !reward_infos[i].initialized() {
                 continue;
             }
 
+            // Update the `reward_growths_outside_x64` for each reward by calculating the
+            // difference between the global reward growth and the current tick’s outside growth.
             self.reward_growths_outside_x64[i] = reward_infos[i]
                 .reward_growth_global_x64
                 .checked_sub(self.reward_growths_outside_x64[i])
                 .unwrap();
         }
 
+        // Return `liquidity_net`, which represents the net liquidity added or removed
+        // when the tick is crossed. Positive value: liquidity added from left to right.
+        // Negative value: liquidity removed from right to left.
         self.liquidity_net
     }
 
@@ -633,14 +684,14 @@ pub mod tick_array_test {
                 -2700,
                 tick_array_ref
                     .borrow()
-                    .next_tick_arrary_start_index(tick_spacing, true)
+                    .next_tick_arrary_start_index(-1800, tick_spacing, true)
             );
             // one_for_zero, next tickarray start_index > current
             assert_eq!(
                 -900,
                 tick_array_ref
                     .borrow()
-                    .next_tick_arrary_start_index(tick_spacing, false)
+                    .next_tick_arrary_start_index(-1800, tick_spacing, false)
             );
         }
 

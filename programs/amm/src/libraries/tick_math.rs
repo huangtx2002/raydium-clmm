@@ -4,7 +4,7 @@ use anchor_lang::require;
 
 /// The minimum tick
 pub const MIN_TICK: i32 = -443636;
-/// The minimum tick
+/// The maximum tick
 pub const MAX_TICK: i32 = -MIN_TICK;
 
 /// The minimum value that can be returned from #get_sqrt_price_at_tick. Equivalent to get_sqrt_price_at_tick(MIN_TICK)
@@ -34,6 +34,7 @@ pub fn get_sqrt_price_at_tick(tick: i32) -> Result<u128, anchor_lang::error::Err
 
     // i = 0
     let mut ratio = if abs_tick & 0x1 != 0 {
+        // Precomputed constant for 2^64 / (1.0001^(2^0)) = 0xfffcb933bd6fb800
         U128([0xfffcb933bd6fb800, 0])
     } else {
         // 2^64
@@ -41,6 +42,7 @@ pub fn get_sqrt_price_at_tick(tick: i32) -> Result<u128, anchor_lang::error::Err
     };
     // i = 1
     if abs_tick & 0x2 != 0 {
+        // Precomputed constant for 2^64 / (1.0001^(2^1)) = 0xfff97272373d4000
         ratio = (ratio * U128([0xfff97272373d4000, 0])) >> NUM_64
     };
     // i = 2
@@ -144,7 +146,7 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32, anchor_lang::
     // Log2 iterative approximation for the fractional part
     // Go through each 2^(j) bit where j < 64 in a Q64.64 number
     // Append current bit value to fraction result if r^2 Q2.126 is more than 2
-    let mut r = if msb >= 64 {
+    let mut r: u128 = if msb >= 64 {
         sqrt_price_x64 >> (msb - 63)
     } else {
         sqrt_price_x64 << (63 - msb)

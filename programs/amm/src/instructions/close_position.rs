@@ -12,6 +12,7 @@ pub struct ClosePosition<'info> {
     pub nft_owner: Signer<'info>,
 
     /// Unique token mint address
+    /// A constraint specified with the #[account] attribute macro to ensure that the token_program used for the Mint account matches the provided token_program.
     #[account(
       mut,
       address = personal_position.nft_mint,

@@ -74,22 +74,37 @@ fn get_remaining_reward_amount(
     reward_funder: &Pubkey,
     reward_index: u8,
 ) -> Result<u64> {
+    // Get the current timestamp
     let current_timestamp = u64::try_from(Clock::get()?.unix_timestamp).unwrap();
+
+    // Load the mutable reference to the pool state
     let mut pool_state = pool_state_loader.load_mut()?;
+
+    // Update the reward information in the pool state based on the current timestamp
     pool_state.update_reward_infos(current_timestamp)?;
 
+    // Get the reward information for the specified reward index
     let reward_info = pool_state.reward_infos[reward_index as usize];
+
+    // Check if the reward information is initialized
     if !reward_info.initialized() {
         return err!(ErrorCode::UnInitializedRewardInfo);
     }
+
+    // Ensure that the reward has ended by checking the last update time and end time
     require_eq!(
         reward_info.last_update_time,
         reward_info.end_time,
         ErrorCode::NotApproved
     );
+
+    // Ensure that the reward funder is the owner of the pool
     require_keys_eq!(reward_funder.key(), pool_state.owner);
+
+    // Ensure that the reward token vault matches the expected token vault in the reward information
     require_keys_eq!(reward_token_vault.key(), reward_info.token_vault);
 
+    // Calculate the remaining amount of the reward token
     let amount_remaining = reward_token_vault
         .amount
         .checked_sub(
@@ -100,5 +115,6 @@ fn get_remaining_reward_amount(
         )
         .unwrap();
 
+    // Return the remaining amount
     Ok(amount_remaining)
 }

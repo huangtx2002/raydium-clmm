@@ -110,14 +110,20 @@ pub struct CreatePool<'info> {
 }
 
 pub fn create_pool(ctx: Context<CreatePool>, sqrt_price_x64: u128, open_time: u64) -> Result<()> {
+    // Validate that both token mints are supported
     if !(util::is_supported_mint(&ctx.accounts.token_mint_0).unwrap()
         && util::is_supported_mint(&ctx.accounts.token_mint_1).unwrap())
     {
         return err!(ErrorCode::NotSupportMint);
     }
+
+    // Get the public key of the pool state
     let pool_id = ctx.accounts.pool_state.key();
+
+    // Load and initialize the pool state
     let mut pool_state = ctx.accounts.pool_state.load_init()?;
 
+    // Calculate the initial tick based on the provided square root price
     let tick = tick_math::get_tick_at_sqrt_price(sqrt_price_x64)?;
     #[cfg(feature = "enable-log")]
     msg!(
@@ -125,13 +131,17 @@ pub fn create_pool(ctx: Context<CreatePool>, sqrt_price_x64: u128, open_time: u6
         sqrt_price_x64,
         tick
     );
-    // init observation
+
+    // Initialize the observation state with the pool ID
     ctx.accounts
         .observation_state
         .load_init()?
         .initialize(pool_id)?;
 
+    // Get the bump seed for the pool state
     let bump = ctx.bumps.pool_state;
+
+    // Initialize the pool state with the provided parameters
     pool_state.initialize(
         bump,
         sqrt_price_x64,
@@ -146,11 +156,13 @@ pub fn create_pool(ctx: Context<CreatePool>, sqrt_price_x64: u128, open_time: u6
         ctx.accounts.observation_state.key(),
     )?;
 
+    // Initialize the tick array bitmap with the pool ID
     ctx.accounts
         .tick_array_bitmap
         .load_init()?
         .initialize(pool_id);
 
+    // Emit an event to signal the creation of the pool
     emit!(PoolCreatedEvent {
         token_mint_0: ctx.accounts.token_mint_0.key(),
         token_mint_1: ctx.accounts.token_mint_1.key(),

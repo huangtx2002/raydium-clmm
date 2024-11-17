@@ -37,22 +37,35 @@ pub fn swap_router_base_in<'a, 'b, 'c: 'info, 'info>(
     amount_in: u64,
     amount_out_minimum: u64,
 ) -> Result<()> {
+    // Initialize the internal amount with the input amount
     let mut amount_in_internal = amount_in;
+
+    // Initialize the input token account and mint with the provided accounts
     let mut input_token_account = Box::new(ctx.accounts.input_token_account.clone());
     let mut input_token_mint = Box::new(ctx.accounts.input_token_mint.clone());
+
+    // Get the remaining accounts to process the swaps
     let mut accounts: &[AccountInfo] = ctx.remaining_accounts;
+
+    // Iterate through the remaining accounts to perform swaps
     while !accounts.is_empty() {
         let mut remaining_accounts = accounts.iter();
         let account_info = remaining_accounts.next().unwrap();
+
+        // Skip accounts that are not AMM configurations
         if accounts.len() != ctx.remaining_accounts.len()
             && account_info.data_len() != AmmConfig::LEN
         {
             accounts = remaining_accounts.as_slice();
             continue;
         }
+
+        // Load the AMM configuration and pool state
         let amm_config = Box::new(Account::<AmmConfig>::try_from(account_info)?);
         let pool_state_loader =
             AccountLoader::<PoolState>::try_from(remaining_accounts.next().unwrap())?;
+
+        // Load the output token account, input vault, output vault, and output token mint
         let output_token_account = Box::new(InterfaceAccount::<TokenAccount>::try_from(
             &remaining_accounts.next().unwrap(),
         )?);
@@ -65,10 +78,13 @@ pub fn swap_router_base_in<'a, 'b, 'c: 'info, 'info>(
         let output_token_mint = Box::new(InterfaceAccount::<Mint>::try_from(
             remaining_accounts.next().unwrap(),
         )?);
+
+        // Load the observation state
         let observation_state =
             AccountLoader::<ObservationState>::try_from(remaining_accounts.next().unwrap())?;
 
         {
+            // Load the pool state and perform checks
             let pool_state = pool_state_loader.load()?;
             // check observation account is owned by the pool
             require_keys_eq!(pool_state.observation_key, observation_state.key());
@@ -77,7 +93,10 @@ pub fn swap_router_base_in<'a, 'b, 'c: 'info, 'info>(
         }
 
         // solana_program::log::sol_log_compute_units();
+        // Update the accounts slice to process the next swap
         accounts = remaining_accounts.as_slice();
+
+        // Perform the swap using the exact_internal_v2 function
         amount_in_internal = exact_internal_v2(
             &mut SwapSingleV2 {
                 payer: ctx.accounts.payer.clone(),
@@ -100,9 +119,12 @@ pub fn swap_router_base_in<'a, 'b, 'c: 'info, 'info>(
             true,
         )?;
         // output token is the new swap input token
+        // Update the input token account and mint for the next swap
         input_token_account = output_token_account;
         input_token_mint = output_token_mint;
     }
+
+    // Ensure the final output amount meets the minimum required amount
     require_gte!(
         amount_in_internal,
         amount_out_minimum,

@@ -41,6 +41,12 @@ impl OperationState {
         let owners_set: HashSet<Pubkey> = HashSet::from_iter(operation_owners.iter().cloned());
         let mut updated_owner: Vec<Pubkey> = owners_set.into_iter().collect();
         updated_owner.sort_by(|a, b| a.cmp(b));
+
+        //Verify that the length of updated_owner does not exceed OPERATION_SIZE_USIZE
+        if updated_owner.len() > OPERATION_SIZE_USIZE {
+            panic!("The total number of unique keys exceeds the allowed operation size.");
+        }
+
         // clear
         self.operation_owners = [Pubkey::default(); OPERATION_SIZE_USIZE];
         // update
@@ -64,6 +70,11 @@ impl OperationState {
         whitelist_mints.retain(|&item| item != Pubkey::default());
         let owners_set: HashSet<Pubkey> = HashSet::from_iter(whitelist_mints.iter().cloned());
         let updated_mints: Vec<Pubkey> = owners_set.into_iter().collect();
+
+        if updated_mints.len() > WHITE_MINT_SIZE_USIZE {
+            panic!("The total number of unique keys exceeds the allowed whitelist mint size.");
+        }
+
         // clear
         self.whitelist_mints = [Pubkey::default(); WHITE_MINT_SIZE_USIZE];
         // update
@@ -115,9 +126,12 @@ mod test {
             operation_owners: [Pubkey::default(); OPERATION_SIZE_USIZE],
             whitelist_mints: [Pubkey::default(); WHITE_MINT_SIZE_USIZE],
         };
-        operation_state.operation_owners[0] = Pubkey::new_unique();
-        operation_state.operation_owners[1] = Pubkey::new_unique();
-        operation_state.operation_owners[2] = Pubkey::new_unique();
+        let existing_owner1 = Pubkey::new_unique();
+        let existing_owner2 = Pubkey::new_unique();
+        let existing_owner3 = Pubkey::new_unique();
+        operation_state.operation_owners[0] = existing_owner1;
+        operation_state.operation_owners[1] = existing_owner2;
+        operation_state.operation_owners[2] = existing_owner3;
         let mut keys = Vec::new();
         keys.push(Pubkey::new_unique());
         keys.push(Pubkey::new_unique());
@@ -128,6 +142,19 @@ mod test {
 
         operation_state.update_operation_owner(keys.clone());
         println!("{:?}", operation_state.operation_owners);
+
+        // Combine the existing owners with the new keys
+        let mut expected_owners = vec![existing_owner1, existing_owner2, existing_owner3];
+        expected_owners.extend(keys.clone());
+        let owners_set: HashSet<Pubkey> = HashSet::from_iter(expected_owners.iter().cloned());
+        expected_owners = owners_set.into_iter().collect();
+        expected_owners.sort_by(|a, b| a.cmp(b));
+
+        // Verify that the updated operation_owners contains the correct keys
+        let mut actual_owners = operation_state.operation_owners.to_vec();
+        actual_owners.retain(|&item| item != Pubkey::default());
+        actual_owners.sort_by(|a, b| a.cmp(b));
+        assert_eq!(actual_owners, expected_owners);
     }
 
     #[test]

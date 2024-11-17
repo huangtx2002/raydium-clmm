@@ -275,30 +275,41 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     //     let memp_program = accounts.memo_program.as_ref().unwrap().to_account_info();
     //     invoke_memo_instruction(DECREASE_MEMO_MSG, memp_program)?;
     // }
+    // Ensure the liquidity to be decreased is less than or equal to the user's current liquidity
     assert!(liquidity <= personal_position.liquidity);
+
+    // Variables to store the pool state before the operation
     let liquidity_before;
     let pool_sqrt_price_x64;
     let pool_tick_current;
     let mut tickarray_bitmap_extension = None;
 
+    // Vector to store remaining accounts for reward collection
     let remaining_collect_accounts = &mut Vec::new();
     {
+        // Load the pool state
         let pool_state = pool_state_loader.load()?;
+
+        // Check if the pool allows decreasing liquidity, collecting fees, or collecting rewards
         if !pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity)
             && !pool_state.get_status_by_bit(PoolStatusBitIndex::CollectFee)
             && !pool_state.get_status_by_bit(PoolStatusBitIndex::CollectReward)
         {
             return err!(ErrorCode::NotApproved);
         }
+
+        // Store the pool state before the operation
         liquidity_before = pool_state.liquidity;
         pool_sqrt_price_x64 = pool_state.sqrt_price_x64;
         pool_tick_current = pool_state.tick_current;
 
+        // Check if the tick array bitmap extension is needed
         let use_tickarray_bitmap_extension = pool_state.is_overflow_default_tickarray_bitmap(vec![
             tick_array_lower_loader.load()?.start_tick_index,
             tick_array_upper_loader.load()?.start_tick_index,
         ]);
 
+        // Process remaining accounts to find the tick array bitmap extension
         for account_info in remaining_accounts.into_iter() {
             if account_info
                 .key()
@@ -309,6 +320,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             }
             remaining_collect_accounts.push(account_info);
         }
+
+        // Ensure the tick array bitmap extension is provided if needed
         if use_tickarray_bitmap_extension {
             require!(
                 tickarray_bitmap_extension.is_some(),
@@ -317,6 +330,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         }
     }
 
+    // Decrease liquidity and update the protocol and personal positions
     let (decrease_amount_0, latest_fees_owed_0, decrease_amount_1, latest_fees_owed_1) =
         decrease_liquidity_and_update_position(
             pool_state_loader,
@@ -328,6 +342,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             liquidity,
         )?;
 
+    // Calculate transfer fees if vault mints are provided
     let mut transfer_fee_0 = 0;
     let mut transfer_fee_1 = 0;
     if vault_0_mint.is_some() {
@@ -338,6 +353,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         transfer_fee_1 =
             util::get_transfer_fee(vault_1_mint.clone().unwrap(), decrease_amount_1).unwrap();
     }
+
+    // Emit an event with the calculated liquidity and fees
     emit!(LiquidityCalculateEvent {
         pool_liquidity: liquidity_before,
         pool_sqrt_price_x64: pool_sqrt_price_x64,
@@ -349,6 +366,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         transfer_fee_0,
         transfer_fee_1,
     });
+
+    // Log the details if logging is enabled
     #[cfg(feature = "enable-log")]
     msg!(
         "decrease_amount_0: {}, transfer_fee_0: {}, latest_fees_owed_0: {}, decrease_amount_1: {}, transfer_fee_1: {}, latest_fees_owed_1: {}",
@@ -359,6 +378,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         transfer_fee_1,
         latest_fees_owed_1
     );
+
+    // Ensure the amounts after fees meet the minimum required amounts
     if liquidity > 0 {
         require_gte!(
             decrease_amount_0 - transfer_fee_0,
@@ -371,14 +392,18 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             ErrorCode::PriceSlippageCheck
         );
     }
+
+    // Calculate the total transfer amounts including fees
     let transfer_amount_0 = decrease_amount_0 + latest_fees_owed_0;
     let transfer_amount_1 = decrease_amount_1 + latest_fees_owed_1;
 
+    // Optionally include the token program 2022
     let mut token_2022_program_opt: Option<AccountInfo> = None;
     if token_program_2022.is_some() {
         token_2022_program_opt = Some(token_program_2022.clone().unwrap().to_account_info());
     }
 
+    // Transfer the amounts from the pool vault to the user's token accounts
     transfer_from_pool_vault_to_user(
         pool_state_loader,
         token_vault_0,
@@ -399,12 +424,14 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         transfer_amount_1,
     )?;
 
+    // Check the unclaimed fees and update the vaults if necessary
     check_unclaimed_fees_and_vault(
         pool_state_loader,
         token_vault_0.deref_mut(),
         token_vault_1.deref_mut(),
     )?;
 
+    // Collect rewards and update the personal position
     let reward_amounts = collect_rewards(
         pool_state_loader,
         remaining_collect_accounts.as_slice(),
@@ -417,6 +444,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             true
         },
     )?;
+
+    // Emit an event with the details of the liquidity decrease
     emit!(DecreaseLiquidityEvent {
         position_nft_mint: personal_position.nft_mint,
         liquidity,
@@ -441,10 +470,14 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
     tick_array_bitmap_extension: Option<&'c AccountInfo<'info>>,
     liquidity: u128,
 ) -> Result<(u64, u64, u64, u64)> {
+    // Load the mutable reference to the pool state
     let mut pool_state = pool_state_loader.load_mut()?;
     let mut decrease_amount_0 = 0;
     let mut decrease_amount_1 = 0;
+
+    // Check if the pool allows decreasing liquidity
     if pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity) {
+        // Burn the specified liquidity and update the protocol position
         (decrease_amount_0, decrease_amount_1) = burn_liquidity(
             &mut pool_state,
             tick_array_lower,
@@ -454,6 +487,7 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
             liquidity,
         )?;
 
+        // Update the user's token fees owed for token_0
         personal_position.token_fees_owed_0 = calculate_latest_token_fees(
             personal_position.token_fees_owed_0,
             personal_position.fee_growth_inside_0_last_x64,
@@ -461,6 +495,7 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
             personal_position.liquidity,
         );
 
+        // Update the user's token fees owed for token_1
         personal_position.token_fees_owed_1 = calculate_latest_token_fees(
             personal_position.token_fees_owed_1,
             personal_position.fee_growth_inside_1_last_x64,
@@ -468,6 +503,7 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
             personal_position.liquidity,
         );
 
+        // Update the user's fee growth inside last values
         personal_position.fee_growth_inside_0_last_x64 =
             protocol_position.fee_growth_inside_0_last_x64;
         personal_position.fee_growth_inside_1_last_x64 =
@@ -480,10 +516,12 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
 
     let mut latest_fees_owed_0 = 0;
     let mut latest_fees_owed_1 = 0;
+    // Check if the pool allows collecting fees
     if pool_state.get_status_by_bit(PoolStatusBitIndex::CollectFee) {
         latest_fees_owed_0 = personal_position.token_fees_owed_0;
         latest_fees_owed_1 = personal_position.token_fees_owed_1;
 
+        // Ensure the pool has enough unclaimed fees to cover the user's fees owed
         require_gte!(
             pool_state.total_fees_token_0 - pool_state.total_fees_claimed_token_0,
             latest_fees_owed_0
@@ -493,9 +531,11 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
             latest_fees_owed_1
         );
 
+        // Reset the user's token fees owed
         personal_position.token_fees_owed_0 = 0;
         personal_position.token_fees_owed_1 = 0;
 
+        // Update the pool's total fees claimed
         pool_state.total_fees_claimed_token_0 = pool_state
             .total_fees_claimed_token_0
             .checked_add(latest_fees_owed_0)
@@ -506,6 +546,7 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
             .unwrap();
     }
 
+    // Return the amounts of token_0 and token_1 decreased and the latest fees owed
     Ok((
         decrease_amount_0,
         latest_fees_owed_0,
@@ -522,19 +563,27 @@ pub fn burn_liquidity<'c: 'info, 'info>(
     tickarray_bitmap_extension: Option<&'c AccountInfo<'info>>,
     liquidity: u128,
 ) -> Result<(u64, u64)> {
+    // Ensure the tick array loaders are associated with the correct pool
     require_keys_eq!(tick_array_lower_loader.load()?.pool_id, pool_state.key());
     require_keys_eq!(tick_array_upper_loader.load()?.pool_id, pool_state.key());
+
+    // Store the current liquidity before burning
     let liquidity_before = pool_state.liquidity;
     // get tick_state
+    // Load and get mutable references to the tick states for the lower and upper ticks
     let mut tick_lower_state = *tick_array_lower_loader
         .load_mut()?
         .get_tick_state_mut(protocol_position.tick_lower_index, pool_state.tick_spacing)?;
     let mut tick_upper_state = *tick_array_upper_loader
         .load_mut()?
         .get_tick_state_mut(protocol_position.tick_upper_index, pool_state.tick_spacing)?;
+
+    // Get the current timestamp
     let clock = Clock::get()?;
+
+    // Modify the position by burning the specified liquidity
     let (amount_0, amount_1, flip_tick_lower, flip_tick_upper) = modify_position(
-        -i128::try_from(liquidity).unwrap(),
+        -i128::try_from(liquidity).unwrap(), // Convert liquidity to a negative i128 to indicate burning
         pool_state,
         protocol_position,
         &mut tick_lower_state,
@@ -543,6 +592,7 @@ pub fn burn_liquidity<'c: 'info, 'info>(
     )?;
 
     // update tick_state
+    // Update the tick states in the tick array loaders
     tick_array_lower_loader.load_mut()?.update_tick_state(
         protocol_position.tick_lower_index,
         pool_state.tick_spacing,
@@ -554,6 +604,7 @@ pub fn burn_liquidity<'c: 'info, 'info>(
         tick_upper_state,
     )?;
 
+    // Check if the lower tick should be flipped (i.e., no longer initialized)
     if flip_tick_lower {
         let mut tick_array_lower = tick_array_lower_loader.load_mut()?;
         tick_array_lower.update_initialized_tick_count(false)?;
@@ -564,6 +615,8 @@ pub fn burn_liquidity<'c: 'info, 'info>(
             )?;
         }
     }
+
+    // Check if the upper tick should be flipped (i.e., no longer initialized)
     if flip_tick_upper {
         let mut tick_array_upper = tick_array_upper_loader.load_mut()?;
         tick_array_upper.update_initialized_tick_count(false)?;
@@ -575,6 +628,7 @@ pub fn burn_liquidity<'c: 'info, 'info>(
         }
     }
 
+    // Emit an event to signal the change in liquidity
     emit!(LiquidityChangeEvent {
         pool_state: pool_state.key(),
         tick: pool_state.tick_current,
@@ -584,6 +638,7 @@ pub fn burn_liquidity<'c: 'info, 'info>(
         liquidity_after: pool_state.liquidity,
     });
 
+    // Return the amounts of token_0 and token_1 that were burned
     Ok((amount_0, amount_1))
 }
 
@@ -595,70 +650,97 @@ pub fn collect_rewards<'a, 'b, 'c, 'info>(
     personal_position_state: &mut PersonalPositionState,
     need_reward_mint: bool,
 ) -> Result<[u64; REWARD_NUM]> {
+    // Initialize an array to store the collected reward amounts
     let mut reward_amounts: [u64; REWARD_NUM] = [0, 0, 0];
+
+    // Check if the pool allows reward collection
     if !pool_state_loader
         .load()?
         .get_status_by_bit(PoolStatusBitIndex::CollectReward)
     {
         return Ok(reward_amounts);
     }
+
+    // Determine the number of accounts required for each reward group
     let mut reward_group_account_num = 3;
     if !need_reward_mint {
         reward_group_account_num = reward_group_account_num - 1
     }
+
+    // Check that the length of the remaining accounts is valid
     check_required_accounts_length(
         pool_state_loader,
         remaining_accounts,
         reward_group_account_num,
     )?;
 
+    // Get the length of the remaining accounts and create an iterator
     let remaining_accounts_len = remaining_accounts.len();
     let mut remaining_accounts = remaining_accounts.iter();
+
+    // Iterate over each reward group
     for i in 0..remaining_accounts_len / reward_group_account_num {
+        // Get the reward token vault and recipient token account from the remaining accounts
         let reward_token_vault =
             InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next().unwrap())?;
         let recipient_token_account =
             InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next().unwrap())?;
 
+        // Optionally get the reward vault mint if needed
         let mut reward_vault_mint: Option<Box<InterfaceAccount<Mint>>> = None;
         if need_reward_mint {
             reward_vault_mint = Some(Box::new(InterfaceAccount::<Mint>::try_from(
                 remaining_accounts.next().unwrap(),
             )?));
         }
+
+        // Ensure the reward token vault and recipient token account have the same mint
         require_keys_eq!(reward_token_vault.mint, recipient_token_account.mint);
+
+        // Ensure the reward token vault matches the expected token vault in the pool state
         require_keys_eq!(
             reward_token_vault.key(),
             pool_state_loader.load_mut()?.reward_infos[i].token_vault
         );
 
+        // Get the reward amount owed for the current reward index
         let reward_amount_owed = personal_position_state.reward_infos[i].reward_amount_owed;
         if reward_amount_owed == 0 {
             continue;
         }
+
+        // Check that the unclaimed reward amount is valid
         pool_state_loader
             .load()?
             .check_unclaimed_reward(i, reward_amount_owed)?;
 
+        // Determine the transfer amount (the lesser of the reward amount owed and the vault amount)
         let transfer_amount = if reward_amount_owed > reward_token_vault.amount {
             reward_token_vault.amount
         } else {
             reward_amount_owed
         };
 
+        // If there is a transfer amount, proceed with the transfer
         if transfer_amount > 0 {
+            // Log the reward collection details
             msg!(
                 "collect reward index: {}, transfer_amount: {}, reward_amount_owed:{} ",
                 i,
                 transfer_amount,
                 reward_amount_owed
             );
+
+            // Update the reward amount owed in the personal position state
             personal_position_state.reward_infos[i].reward_amount_owed =
                 reward_amount_owed.checked_sub(transfer_amount).unwrap();
+
+            // Update the claimed reward amount in the pool state
             pool_state_loader
                 .load_mut()?
                 .add_reward_clamed(i, transfer_amount)?;
 
+            // Transfer the reward from the pool vault to the recipient's token account
             transfer_from_pool_vault_to_user(
                 &pool_state_loader,
                 &reward_token_vault,
@@ -669,9 +751,12 @@ pub fn collect_rewards<'a, 'b, 'c, 'info>(
                 transfer_amount,
             )?;
         }
+
+        // Store the transfer amount in the reward amounts array
         reward_amounts[i] = transfer_amount
     }
 
+    // Return the collected reward amounts
     Ok(reward_amounts)
 }
 
@@ -699,11 +784,14 @@ pub fn check_unclaimed_fees_and_vault(
     token_vault_0: &mut InterfaceAccount<TokenAccount>,
     token_vault_1: &mut InterfaceAccount<TokenAccount>,
 ) -> Result<()> {
+    // Reload the token vault accounts to get the latest data
     token_vault_0.reload()?;
     token_vault_1.reload()?;
 
+    // Load the mutable reference to the pool state
     let pool_state = &mut pool_state_loader.load_mut()?;
 
+    // Calculate the unclaimed fees for token_0 and token_1
     let unclaimed_fee_token_0 = pool_state
         .total_fees_token_0
         .checked_sub(pool_state.total_fees_claimed_token_0)
@@ -713,9 +801,11 @@ pub fn check_unclaimed_fees_and_vault(
         .checked_sub(pool_state.total_fees_claimed_token_1)
         .unwrap();
 
+    // Check if the unclaimed fees are greater than or equal to the amounts in the token vaults
     if (unclaimed_fee_token_0 >= token_vault_0.amount && token_vault_0.amount != 0)
         || (unclaimed_fee_token_1 >= token_vault_1.amount && token_vault_1.amount != 0)
     {
+        // Disable the fee collection status if the unclaimed fees exceed the vault amounts
         pool_state.set_status_by_bit(PoolStatusBitIndex::CollectFee, PoolStatusBitFlag::Disable);
     }
     Ok(())

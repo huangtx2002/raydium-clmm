@@ -14,6 +14,15 @@ construct_uint! {
     pub struct U512(8);
 }
 
+///$: Denotes macro variables.
+///$( ... )*: Repeats the pattern zero or more times.
+///#[$attr:meta]: Captures a meta attribute.  Meta attributes are annotations like #[derive(...)] or #[repr(...)].  They are used to provide additional information about the item being defined.
+///$visibility:vis: Captures a visibility specifier(e.g. pub).
+///$name:ident: Captures an identifier (e.g. the name of the struct).
+///$n_words:tt: Captures a token tree - match any sequecne of tokens.
+///=>: Separates the macro pattern from the macro body.
+///Internal Macro Call: Calls the internal construct macro with the captured values.
+///
 #[macro_export]
 macro_rules! construct_bignum {
     ( $(#[$attr:meta])* $visibility:vis struct $name:ident ( $n_words:tt ); ) => {
